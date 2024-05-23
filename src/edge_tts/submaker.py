@@ -5,34 +5,45 @@ SubMaker is a package that makes the process of creating subtitles with
 information provided by the service easier.
 """
 
-import math
-from typing import List, Tuple
-from xml.sax.saxutils import escape, unescape
+from typing import Any, Dict, Generator, List, Optional, Set, Tuple
+import srt
 
 
-def formatter(start_time: float, end_time: float, subdata: str) -> str:
+class FilteredText:
     """
-    formatter returns the timecode and the text of the subtitle.
+    FilteredText allows you to map a text to a filtered version of itself.
+    You could use the filtered version and then find the indeces in the
+    original text.
     """
-    return (
-        f"{mktimestamp(start_time)} --> {mktimestamp(end_time)}\r\n"
-        f"{escape(subdata)}\r\n\r\n"
-    )
 
+    def __init__(self, text: str) -> None:
+        self.original_text: str = text
+        self.filtered_text: Optional[str] = None
+        self.filtered_to_original: Dict[int, int] = {}
+        self.original_to_filtered: Dict[int, int] = {}
 
-def mktimestamp(time_unit: float) -> str:
-    """
-    mktimestamp returns the timecode of the subtitle.
+    def filter_text(self, filter_chars: Set[str]) -> None:
+        """
+        Filter the text by only keeping the characters in filter_chars.
+        """
+        self.filtered_text = ""
+        for i, char in enumerate(self.original_text):
+            if char in filter_chars:
+                self.filtered_text += char
+                self.filtered_to_original[len(self.filtered_text) - 1] = i
+                self.original_to_filtered[i] = len(self.filtered_text) - 1
 
-    The timecode is in the format of 00:00:00.000.
+    def get_original_index(self, filtered_index: int, default: int = -1) -> int:
+        """
+        Get the original index from the filtered index.
+        """
+        return self.filtered_to_original.get(filtered_index, default)
 
-    Returns:
-        str: The timecode of the subtitle.
-    """
-    hour = math.floor(time_unit / 10**7 / 3600)
-    minute = math.floor((time_unit / 10**7 / 60) % 60)
-    seconds = (time_unit / 10**7) % 60
-    return f"{hour:02d}:{minute:02d}:{seconds:06.3f}"
+    def get_filtered_index(self, original_index: int, default: int = -1) -> int:
+        """
+        Get the filtered index from the original index.
+        """
+        return self.original_to_filtered.get(original_index, default)
 
 
 class SubMaker:
@@ -40,17 +51,18 @@ class SubMaker:
     SubMaker class
     """
 
-    def __init__(self) -> None:
+    def __init__(self, full_prompt: str) -> None:
         """
         SubMaker constructor.
         """
-        self.offset: List[Tuple[float, float]] = []
-        self.subs: List[str] = []
+        self.full_prompt: str = full_prompt
+        self.word_boundary_offset: List[Tuple[float, float]] = []
+        self.word_boundary_text: List[str] = []
+        self.word_boundary_chars: Set[str] = set()
 
-    def create_sub(self, timestamp: Tuple[float, float], text: str) -> None:
+    def add_cue_part(self, timestamp: Tuple[float, float], text: str) -> None:
         """
-        create_sub creates a subtitle with the given timestamp and text
-        and adds it to the list of subtitles
+        Add a subtitle part to the SubMaker object.
 
         Args:
             timestamp (tuple): The offset and duration of the subtitle.
@@ -59,67 +71,51 @@ class SubMaker:
         Returns:
             None
         """
-        self.offset.append((timestamp[0], timestamp[0] + timestamp[1]))
-        self.subs.append(text)
+        self.word_boundary_offset.append((timestamp[0], timestamp[0] + timestamp[1]))
+        self.word_boundary_text.append(text)
+        self.word_boundary_chars.update(text)
 
-    def generate_subs(self, words_in_cue: int = 10) -> str:
+    def get_filtered_text(self) -> FilteredText:
         """
-        generate_subs generates the complete subtitle file.
-
-        Args:
-            words_in_cue (int): defines the number of words in a given cue
+        Get the filtered text from the SubMaker object.
 
         Returns:
-            str: The complete subtitle file.
+            FilteredText: The filtered text object.
         """
-        if len(self.subs) != len(self.offset):
-            raise ValueError("subs and offset are not of the same length")
+        filtered_text = FilteredText(self.full_prompt)
+        filtered_text.filter_text(self.word_boundary_chars)
+        return filtered_text
 
-        if words_in_cue <= 0:
-            raise ValueError("words_in_cue must be greater than 0")
+    def get_srt(self, words_in_cue: int = 10) -> str:
+        """
+        Get the SRT formatted subtitles from the SubMaker object.
 
-        data = "WEBVTT\r\n\r\n"
-        sub_state_count = 0
-        sub_state_start = -1.0
-        sub_state_subs = ""
-        for idx, (offset, subs) in enumerate(zip(self.offset, self.subs)):
-            start_time, end_time = offset
-            subs = unescape(subs)
+        Returns:
+            str: The SRT formatted subtitles.
+        """
+        filtered_text = self.get_filtered_text()
 
-            # wordboundary is guaranteed not to contain whitespace
-            if len(sub_state_subs) > 0:
-                sub_state_subs += " "
-            sub_state_subs += subs
+        def get_cue_data() -> Generator[Any, None, None]:
+            last_filtered_index = 0
+            for i, ((start_time, end_time), text) in enumerate(
+                zip(self.word_boundary_offset, self.word_boundary_text)
+            ):
+                start_time = srt.timedelta(microseconds=start_time / 10)
+                end_time = srt.timedelta(microseconds=end_time / 10)
 
-            if sub_state_start == -1.0:
-                sub_state_start = start_time
-            sub_state_count += 1
-
-            if sub_state_count == words_in_cue or idx == len(self.offset) - 1:
-                subs = sub_state_subs
-                split_subs: List[str] = [
-                    subs[i : i + 79] for i in range(0, len(subs), 79)
-                ]
-                for i in range(len(split_subs) - 1):
-                    sub = split_subs[i]
-                    split_at_word = True
-                    if sub[-1] == " ":
-                        split_subs[i] = sub[:-1]
-                        split_at_word = False
-
-                    if sub[0] == " ":
-                        split_subs[i] = sub[1:]
-                        split_at_word = False
-
-                    if split_at_word:
-                        split_subs[i] += "-"
-
-                data += formatter(
-                    start_time=sub_state_start,
-                    end_time=end_time,
-                    subdata="\r\n".join(split_subs),
+                end_index = filtered_text.get_original_index(
+                    filtered_text.filtered_text.find(text, last_filtered_index)
+                    + len(text)
+                    - 1
                 )
-                sub_state_count = 0
-                sub_state_start = -1
-                sub_state_subs = ""
-        return data
+                start_index = filtered_text.get_original_index(last_filtered_index)
+                last_filtered_index = filtered_text.get_filtered_index(end_index) + 1
+
+                yield srt.Subtitle(
+                    index=i + 1,
+                    start=start_time,
+                    end=end_time,
+                    content=self.full_prompt[start_index : end_index + 1],
+                )
+
+        return srt.compose(get_cue_data())

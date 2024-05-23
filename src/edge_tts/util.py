@@ -58,7 +58,7 @@ async def _run_tts(args: Any) -> None:
         volume=args.volume,
         pitch=args.pitch,
     )
-    subs: SubMaker = SubMaker()
+    subs: SubMaker = SubMaker(args.text)
     with (
         open(args.write_media, "wb") if args.write_media else sys.stdout.buffer
     ) as audio_file:
@@ -66,7 +66,7 @@ async def _run_tts(args: Any) -> None:
             if chunk["type"] == "audio":
                 audio_file.write(chunk["data"])
             elif chunk["type"] == "WordBoundary":
-                subs.create_sub((chunk["offset"], chunk["duration"]), chunk["text"])
+                subs.add_cue_part((chunk["offset"], chunk["duration"]), chunk["text"])
 
     sub_file: Union[TextIOWrapper, TextIO] = (
         open(args.write_subtitles, "w", encoding="utf-8")
@@ -74,7 +74,7 @@ async def _run_tts(args: Any) -> None:
         else sys.stderr
     )
     with sub_file:
-        sub_file.write(subs.generate_subs(args.words_in_cue))
+        sub_file.write(subs.get_srt())
 
 
 async def amain() -> None:
