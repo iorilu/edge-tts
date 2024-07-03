@@ -17,33 +17,33 @@ class FilteredText:
     """
 
     def __init__(self, text: str) -> None:
-        self.original_text: str = text
-        self.filtered_text: Optional[str] = None
-        self.filtered_to_original: Dict[int, int] = {}
-        self.original_to_filtered: Dict[int, int] = {}
+        self.otext: str = text
+        self.ftext: Optional[str] = None
+        self.f_to_o_map: Dict[int, int] = {}
+        self.o_to_f_map: Dict[int, int] = {}
 
     def filter_text(self, filter_chars: Set[str]) -> None:
         """
         Filter the text by only keeping the characters in filter_chars.
         """
-        self.filtered_text = ""
-        for i, char in enumerate(self.original_text):
+        self.ftext = ""
+        for i, char in enumerate(self.otext):
             if char in filter_chars:
-                self.filtered_text += char
-                self.filtered_to_original[len(self.filtered_text) - 1] = i
-                self.original_to_filtered[i] = len(self.filtered_text) - 1
+                self.ftext += char
+                self.f_to_o_map[len(self.ftext) - 1] = i
+                self.o_to_f_map[i] = len(self.ftext) - 1
 
     def get_original_index(self, filtered_index: int, default: int = -1) -> int:
         """
         Get the original index from the filtered index.
         """
-        return self.filtered_to_original.get(filtered_index, default)
+        return self.f_to_o_map.get(filtered_index, default)
 
     def get_filtered_index(self, original_index: int, default: int = -1) -> int:
         """
         Get the filtered index from the original index.
         """
-        return self.original_to_filtered.get(original_index, default)
+        return self.o_to_f_map.get(original_index, default)
 
 
 class SubMaker:
@@ -75,7 +75,7 @@ class SubMaker:
         self.word_boundary_text.append(text)
         self.word_boundary_chars.update(text)
 
-    def get_filtered_text(self) -> FilteredText:
+    def make_filtered_text(self) -> FilteredText:
         """
         Get the filtered text from the SubMaker object.
 
@@ -83,6 +83,8 @@ class SubMaker:
             FilteredText: The filtered text object.
         """
         filtered_text = FilteredText(self.full_prompt)
+        for char in (" ", ","):
+            self.word_boundary_chars.discard(char)
         filtered_text.filter_text(self.word_boundary_chars)
         return filtered_text
 
@@ -93,23 +95,29 @@ class SubMaker:
         Returns:
             str: The SRT formatted subtitles.
         """
-        filtered_text = self.get_filtered_text()
+
+        filtered_text = self.make_filtered_text()
+        words_in_cue = max(1, min(words_in_cue, len(self.word_boundary_offset)))
 
         def get_cue_data() -> Generator[Any, None, None]:
             last_filtered_index = 0
-            for i, ((start_time, end_time), text) in enumerate(
-                zip(self.word_boundary_offset, self.word_boundary_text)
-            ):
+
+            for i in range(0, len(self.word_boundary_offset), words_in_cue):
+                i_end = min(words_in_cue, len(self.word_boundary_offset) - i)
+
+                start_time = self.word_boundary_offset[i][0]
+                end_time = self.word_boundary_offset[i + i_end - 1][1]
+                text = "".join(self.word_boundary_text[i : i + i_end])
+                text = text.replace(" ", "")
+                text = text.replace(",", "")
+
                 start_time = srt.timedelta(microseconds=start_time / 10)
                 end_time = srt.timedelta(microseconds=end_time / 10)
 
-                end_index = filtered_text.get_original_index(
-                    filtered_text.filtered_text.find(text, last_filtered_index)
-                    + len(text)
-                    - 1
-                )
-                start_index = filtered_text.get_original_index(last_filtered_index)
-                last_filtered_index = filtered_text.get_filtered_index(end_index) + 1
+                fend_index = filtered_text.ftext.find(text, last_filtered_index) + len(text) - 1
+                end_index = filtered_text.get_original_index(fend_index, len(self.full_prompt) - 1)
+                start_index = filtered_text.get_original_index(last_filtered_index, 0)
+                last_filtered_index = fend_index + 1
 
                 yield srt.Subtitle(
                     index=i + 1,
