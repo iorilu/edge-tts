@@ -371,6 +371,7 @@ class Communicate:
             proxy=self.proxy,
             headers=WSS_HEADERS,
             ssl=ssl_ctx,
+            receive_timeout=100
         ) as websocket:
             # Send the request to the service.
             await send_command_request()
