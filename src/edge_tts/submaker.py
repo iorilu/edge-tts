@@ -1,82 +1,136 @@
-"""SubMaker module is used to generate subtitles from WordBoundary events."""
+"""
+SubMaker package for the Edge TTS project.
 
-from typing import List
+SubMaker is a package that makes the process of creating subtitles with
+information provided by the service easier.
+"""
 
-import srt  # type: ignore
+import math
+from typing import List, Tuple
+from xml.sax.saxutils import escape, unescape
 
-from .typing import TTSChunk
+
+def formatter(sub_line_count: int, start_time: float, end_time: float, subdata: str) -> str:
+    """
+    formatter returns the timecode and the text of the subtitle.
+    """
+    return (
+        f"{sub_line_count}\n"
+        f"{mktimestamp(start_time)} --> {mktimestamp(end_time)}\n"
+        f"{escape(subdata)}\n\n"
+    )
+
+
+def mktimestamp(time_unit: float) -> str:
+    """
+    mktimestamp returns the timecode of the subtitle.
+
+    The timecode is in the format of 00:00:00.000.
+
+    Returns:
+        str: The timecode of the subtitle.
+    """
+    hour = math.floor(time_unit / 10**7 / 3600)
+    minute = math.floor((time_unit / 10**7 / 60) % 60)
+    seconds = (time_unit / 10**7) % 60
+    # return f"{hour:02d}:{minute:02d}:{seconds:06.3f}"
+    return f"{hour:02d}:{minute:02d}:{seconds:06.3f}".replace(".", ",")
 
 
 class SubMaker:
     """
-    SubMaker is used to generate subtitles from WordBoundary messages.
+    SubMaker class
     """
 
     def __init__(self) -> None:
-        self.cues: List[srt.Subtitle] = []  # type: ignore
-
-    def feed(self, msg: TTSChunk) -> None:
         """
-        Feed a WordBoundary message to the SubMaker object.
+        SubMaker constructor.
+        """
+        self.offset: List[Tuple[float, float]] = []
+        self.subs: List[str] = []
+
+    def create_sub(self, timestamp: Tuple[float, float], text: str) -> None:
+        """
+        create_sub creates a subtitle with the given timestamp and text
+        and adds it to the list of subtitles
 
         Args:
-            msg (dict): The WordBoundary message.
+            timestamp (tuple): The offset and duration of the subtitle.
+            text (str): The text of the subtitle.
 
         Returns:
             None
         """
-        if msg["type"] != "WordBoundary":
-            raise ValueError("Invalid message type, expected 'WordBoundary'")
+        self.offset.append((timestamp[0], timestamp[0] + timestamp[1]))
+        self.subs.append(text)
 
-        self.cues.append(
-            srt.Subtitle(
-                index=len(self.cues) + 1,
-                start=srt.timedelta(microseconds=msg["offset"] / 10),
-                end=srt.timedelta(microseconds=(msg["offset"] + msg["duration"]) / 10),
-                content=msg["text"],
-            )
-        )
-
-    def merge_cues(self, words: int) -> None:
+    def generate_subs(self, three_dimensional_list, words_in_cue: int = 10) -> str:
         """
-        Merge cues to reduce the number of cues.
+        generate_subs generates the complete subtitle file.
 
         Args:
-            words (int): The number of words to merge.
+            words_in_cue (int): defines the number of words in a given cue
 
         Returns:
-            None
+            str: The complete subtitle file.
+
+        three_dimensional_list：
+            [(sentence, last_word, last_word_num)， (sentence, last_word, last_word_num)]
         """
-        if words <= 0:
-            raise ValueError("Invalid number of words to merge, expected > 0")
+        if len(self.subs) != len(self.offset):
+            raise ValueError("subs and offset are not of the same length")
 
-        if len(self.cues) == 0:
-            return
+        if words_in_cue <= 0:
+            raise ValueError("words_in_cue must be greater than 0")
 
-        new_cues: List[srt.Subtitle] = []  # type: ignore
-        current_cue: srt.Subtitle = self.cues[0]  # type: ignore
-        for cue in self.cues[1:]:
-            if len(current_cue.content.split()) < words:
-                current_cue = srt.Subtitle(
-                    index=current_cue.index,
-                    start=current_cue.start,
-                    end=cue.end,
-                    content=current_cue.content + " " + cue.content,
+        # data = "WEBVTT\r\n\r\n"
+        data = ''
+        sub_state_count = 0
+        sub_state_start = -1.0
+        sub_state_subs = ""
+        sub_line_count = 0     # new variable used to indicate which line of subtitle this is
+        for idx, (offset, subs) in enumerate(zip(self.offset, self.subs)):
+            start_time, end_time = offset
+            subs = unescape(subs)
+
+            # wordboundary is guaranteed not to contain whitespace
+            # if len(sub_state_subs) > 0:
+            #     sub_state_subs += " "
+            sub_state_subs += subs
+
+            if sub_state_start == -1.0:
+                sub_state_start = start_time
+            sub_state_count += 1
+
+            sentence, last_word, last_word_num = three_dimensional_list[sub_line_count]
+            if sub_state_subs.count(last_word) == last_word_num or idx == len(self.offset) - 1:
+                sub_line_count += 1
+                # subs = sub_state_subs
+                subs = sentence
+                split_subs: List[str] = [
+                    subs[i: i + 79] for i in range(0, len(subs), 79)
+                ]
+                for i in range(len(split_subs) - 1):
+                    sub = split_subs[i]
+                    split_at_word = True
+                    if sub[-1] == " ":
+                        split_subs[i] = sub[:-1]
+                        split_at_word = False
+
+                    if sub[0] == " ":
+                        split_subs[i] = sub[1:]
+                        split_at_word = False
+
+                    if split_at_word:
+                        split_subs[i] += "-"
+
+                data += formatter(
+                    sub_line_count=sub_line_count,
+                    start_time=sub_state_start,
+                    end_time=end_time,
+                    subdata="\r\n".join(split_subs),
                 )
-            else:
-                new_cues.append(current_cue)
-                current_cue = cue
-        new_cues.append(current_cue)
-        self.cues = new_cues
-
-    def get_srt(self) -> str:
-        """
-        Get the SRT formatted subtitles from the SubMaker object.
-
-        Returns:
-            str: The SRT formatted subtitles.
-        """
-        return srt.compose(self.cues)  # type: ignore
-
-    def __str__(self) -> str:
-        return self.get_srt()
+                sub_state_count = 0
+                sub_state_start = -1
+                sub_state_subs = ""
+        return data
